@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -15,20 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/generative-ai-go/genai"
-	"github.com/joho/godotenv"
+	"github.com/brianvoe/gofakeit/v7"
 	"github.com/xuri/excelize/v2"
-	"google.golang.org/api/option"
 )
 
 // Constants
 const (
-	geminiModelName   = "gemini-1.5-flash-latest"
-	apiTimeoutSeconds = 60
-	apiRetries        = 2
-	envAPIKeyName     = "GEMINI_API_KEY"
-	inputDir          = "input"
-	outputDir         = "output"
+	inputDir  = "input"
+	outputDir = "output"
 )
 
 // GeneratedRow represents a single row of generated data
@@ -47,111 +40,62 @@ type StructInfo struct {
 	IsNested bool                 // Indicates if this struct is used as a field in another struct
 }
 
-// AIAgent handles the AI model interactions
-type AIAgent struct {
-	client *genai.Client
-	model  string
-}
+// generateCustomer generates 30 rows of fake customer data using gofakeit
+func generateCustomer(structInfos map[string]StructInfo) ([]GeneratedRow, error) {
+	rows := make([]GeneratedRow, 30)
+	currentStruct := structInfos["Customer"]
 
-// NewAIAgent creates a new AIAgent instance
-func NewAIAgent(apiKey string) (*AIAgent, error) {
-	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
-	}
-	return &AIAgent{
-		client: client,
-		model:  geminiModelName,
-	}, nil
-}
+	// Seed gofakeit for reproducible results (optional)
+	gofakeit.Seed(time.Now().UnixNano())
 
-// GenerateData sends the Go struct definitions to the AI and returns generated data
-func (agent *AIAgent) GenerateData(structName string, structInfos map[string]StructInfo) ([]GeneratedRow, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), apiTimeoutSeconds*time.Second)
-	defer cancel()
-	genModel := agent.client.GenerativeModel(agent.model)
+	for i := 0; i < 30; i++ {
+		row := make(GeneratedRow)
 
-	// Combine all struct definitions into the prompt
-	var allDefs strings.Builder
-	for _, info := range structInfos {
-		allDefs.WriteString(fmt.Sprintf("%s\n\n", info.Def))
-	}
-
-	// Construct a generic prompt for data generation
-	prompt := fmt.Sprintf(`Given the following Go struct definitions:
-
-%s
-
-Generate exactly 30 rows of realistic accounting data for the struct named "%s". 
-Each row must be a valid JSON object with field names matching the struct's JSON tags (or field names if no JSON tags are present). 
-Ensure values are realistic for accounting purposes:
-- Use ISO 8601 format (e.g., "2025-05-16T15:00:00Z") for timestamps.
-- Use numbers for numeric fields (e.g., amounts, IDs).
-- Use strings for text fields (e.g., names, descriptions).
-- For phone number fields, include a country code (e.g., "+1", "+44") and a realistic phone number (e.g., "555-1234") using the correct JSON tags.
-- Ensure all required fields are present and non-empty unless explicitly optional (e.g., marked with omitempty in JSON tags).
-- Ensure numeric values (e.g., amounts) are reasonable for accounting.
-- Ensure IDs are unique across all rows where applicable.
-
-
-Return only a JSON array of 30 objects, no additional text or wrappers.`, allDefs.String(), structName)
-
-	// Generate content with retries
-	var resp *genai.GenerateContentResponse
-	var err error
-	for attempt := 1; attempt <= apiRetries; attempt++ {
-		resp, err = genModel.GenerateContent(ctx, genai.Text(prompt))
-		if err == nil {
-			break
-		}
-		log.Printf("Attempt %d failed for %s: %v", attempt, structName, err)
-		if attempt == apiRetries {
-			return nil, fmt.Errorf("failed to generate content for %s after %d attempts: %v", structName, apiRetries, err)
-		}
-		time.Sleep(time.Second)
-	}
-
-	// Parse the generated JSON
-	var rows []GeneratedRow
-	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-		part := resp.Candidates[0].Content.Parts[0]
-		if textPart, ok := part.(genai.Text); ok {
-			// Clean the response to extract valid JSON
-			content := string(textPart)
-			log.Printf("Raw AI response for %s: %s", structName, content)
-
-			// Remove common wrappers and ensure valid JSON array
-			content = strings.TrimSpace(content)
-			content = strings.TrimPrefix(content, "```json\n")
-			content = strings.TrimPrefix(content, "```\n")
-			content = strings.TrimSuffix(content, "\n```")
-			content = strings.TrimSpace(content)
-			if !strings.HasPrefix(content, "[") || !strings.HasSuffix(content, "]") {
-				content = "[" + content + "]"
+		// Generate data for each field in the Customer struct
+		for fieldName, fieldInfo := range currentStruct.Fields {
+			jsonTag := fieldInfo.JSONTag
+			if jsonTag == "" {
+				jsonTag = fieldName
 			}
 
-			log.Printf("Cleaned JSON content for %s: %s", structName, content)
+			// Handle nested Phone struct
+			if fieldInfo.Type == "Phone" {
+				nestedRow := make(map[string]interface{})
+				for nestedFieldName, nestedFieldInfo := range structInfos["Phone"].Fields {
+					nestedJsonTag := nestedFieldInfo.JSONTag
+					if nestedJsonTag == "" {
+						nestedJsonTag = nestedFieldName
+					}
 
-			// Try to unmarshal the cleaned content
-			err = json.Unmarshal([]byte(content), &rows)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse generated JSON for %s: %v (cleaned content: %s)", structName, err, content)
+					switch nestedFieldName {
+					case "p1":
+						// Generate country code (e.g., "+1", "+44")
+						nestedRow[nestedJsonTag] = gofakeit.PhoneFormatted()[:2]
+					case "p2":
+						// Generate phone number without country code
+						nestedRow[nestedJsonTag] = gofakeit.PhoneFormatted()[3:] // Skip country code and space
+					}
+				}
+				row[jsonTag] = nestedRow
+				continue
 			}
-		} else {
-			return nil, fmt.Errorf("unexpected response format for %s", structName)
+
+			// Generate data for non-nested fields
+			switch fieldName {
+			case "Name":
+				row[jsonTag] = gofakeit.Name()
+			case "Type":
+				row[jsonTag] = gofakeit.RandomString([]string{"Individual", "Business", "NonProfit"})
+			case "CustomerID":
+				row[jsonTag] = gofakeit.UUID()
+			case "TaxIdNumber":
+				row[jsonTag] = gofakeit.Number(100000000, 999999999) // 9-digit tax ID
+			}
 		}
-	} else {
-		return nil, fmt.Errorf("no valid response from model for %s", structName)
+		rows[i] = row
 	}
 
-	// Validate the number of rows
-	if len(rows) < 25 || len(rows) > 30 {
-		return nil, fmt.Errorf("expected around 30 rows for %s, got %d", structName, len(rows))
-	}
-
-	// Validate schema dynamically based on struct fields
-	currentStruct := structInfos[structName]
+	// Validate schema
 	for i, row := range rows {
 		for fieldName, fieldInfo := range currentStruct.Fields {
 			jsonTag := fieldInfo.JSONTag
@@ -159,22 +103,19 @@ Return only a JSON array of 30 objects, no additional text or wrappers.`, allDef
 				jsonTag = fieldName
 			}
 			if _, ok := row[jsonTag]; !ok {
-				return nil, fmt.Errorf("row %d for %s missing required field: %s", i+1, structName, jsonTag)
+				return nil, fmt.Errorf("row %d missing required field: %s", i+1, jsonTag)
 			}
-
-			// Check if the field is a struct and validate nested object
-			if _, isStruct := structInfos[fieldInfo.Type]; isStruct {
+			if fieldInfo.Type == "Phone" {
 				if nested, ok := row[jsonTag].(map[string]interface{}); !ok {
-					return nil, fmt.Errorf("row %d for %s has invalid %s field: expected nested object, got %v", i+1, structName, jsonTag, row[jsonTag])
+					return nil, fmt.Errorf("row %d has invalid phone field: expected nested object, got %v", i+1, row[jsonTag])
 				} else {
-					// Validate nested fields
-					for nestedField, nestedFieldInfo := range structInfos[fieldInfo.Type].Fields {
+					for nestedField, nestedFieldInfo := range structInfos["Phone"].Fields {
 						nestedJsonTag := nestedFieldInfo.JSONTag
 						if nestedJsonTag == "" {
 							nestedJsonTag = nestedField
 						}
-						if _, ok := nested[nestedJsonTag]; !ok && !strings.Contains(nestedFieldInfo.JSONTag, "omitempty") {
-							return nil, fmt.Errorf("row %d for %s has invalid %s field: missing nested field %s", i+1, structName, jsonTag, nestedJsonTag)
+						if _, ok := nested[nestedJsonTag]; !ok {
+							return nil, fmt.Errorf("row %d has invalid phone field: missing nested field %s", i+1, nestedJsonTag)
 						}
 					}
 				}
@@ -217,6 +158,8 @@ func SaveToExcel(structName string, rows []GeneratedRow, outputPath string) erro
 				switch v := value.(type) {
 				case float64:
 					f.SetCellValue(sheet, cell, v)
+				case int:
+					f.SetCellValue(sheet, cell, v)
 				case string:
 					f.SetCellValue(sheet, cell, v)
 				case map[string]interface{}:
@@ -247,7 +190,7 @@ func extractStructDefs(inputPath string) (map[string]StructInfo, error) {
 	}
 
 	structInfos := make(map[string]StructInfo)
-	// First pass: Collect all struct definitions
+	// Collect all struct definitions
 	for _, decl := range node.Decls {
 		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.TYPE {
 			for _, spec := range genDecl.Specs {
@@ -281,7 +224,7 @@ func extractStructDefs(inputPath string) (map[string]StructInfo, error) {
 									parts := strings.Split(tag, "json:\"")
 									if len(parts) > 1 {
 										jsonTag = strings.Split(parts[1], "\"")[0]
-										jsonTag = strings.Split(jsonTag, ",")[0] // Remove omitempty, etc.
+										jsonTag = strings.Split(jsonTag, ",")[0]
 									}
 								}
 								fields[name.Name] = FieldInfo{
@@ -301,7 +244,7 @@ func extractStructDefs(inputPath string) (map[string]StructInfo, error) {
 		}
 	}
 
-	// Second pass: Mark nested structs
+	// Mark nested structs
 	for _, info := range structInfos {
 		for _, fieldInfo := range info.Fields {
 			if _, exists := structInfos[fieldInfo.Type]; exists {
@@ -319,9 +262,9 @@ func extractStructDefs(inputPath string) (map[string]StructInfo, error) {
 	return structInfos, nil
 }
 
-// ProcessModel processes a single Go file
-func (agent *AIAgent) ProcessModel(inputPath, outputDir string) error {
-	log.Printf("Processing Go file: %s", inputPath)
+// processCustomer processes the customer.go file and generates data
+func processCustomer(inputPath, outputDir string) error {
+	log.Printf("Processing customer.go file: %s", inputPath)
 
 	// Extract struct definitions
 	structInfos, err := extractStructDefs(inputPath)
@@ -329,116 +272,58 @@ func (agent *AIAgent) ProcessModel(inputPath, outputDir string) error {
 		return fmt.Errorf("failed to extract structs: %v", err)
 	}
 
-	// Process each non-nested struct
-	for structName, info := range structInfos {
-		if info.IsNested {
-			log.Printf("Skipping nested struct: %s", structName)
-			continue
-		}
-		log.Printf("Processing struct: %s", structName)
-
-		// Generate data
-		rows, err := agent.GenerateData(structName, structInfos)
-		if err != nil {
-			log.Printf("Failed to generate data for %s: %v", structName, err)
-			continue
-		}
-
-		// Create output filename based on struct name
-		outputPath := filepath.Join(outputDir, fmt.Sprintf("%s_output.xlsx", structName))
-
-		// Save to Excel
-		err = SaveToExcel(structName, rows, outputPath)
-		if err != nil {
-			log.Printf("Failed to save Excel for %s: %v", structName, err)
-			continue
-		}
-
-		log.Printf("Generated Excel file: %s", outputPath)
+	// Check if Customer struct exists
+	if _, exists := structInfos["Customer"]; !exists {
+		return fmt.Errorf("Customer struct not found in %s", inputPath)
 	}
 
+	// Generate data for Customer struct
+	rows, err := generateCustomer(structInfos)
+	if err != nil {
+		return fmt.Errorf("failed to generate customer data: %v", err)
+	}
+
+	// Create output filename
+	outputPath := filepath.Join(outputDir, "Customer_output.xlsx")
+
+	// Save to Excel
+	err = SaveToExcel("Customer", rows, outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to save Excel: %v", err)
+	}
+
+	log.Printf("Generated Excel file: %s", outputPath)
 	return nil
-}
-
-// ProcessInputFolder processes all Go files in the input folder
-func (agent *AIAgent) ProcessInputFolder(inputDir, outputDir string) error {
-	log.Printf("Checking input directory: %s", inputDir)
-
-	// Ensure input directory exists
-	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
-		return fmt.Errorf("input directory does not exist: %s", inputDir)
-	}
-
-	// Ensure output directory exists
-	log.Printf("Creating output directory: %s", outputDir)
-	err := os.MkdirAll(outputDir, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create output directory: %v", err)
-	}
-
-	// Read input directory
-	files, err := os.ReadDir(inputDir)
-	if err != nil {
-		return fmt.Errorf("failed to read input directory: %v", err)
-	}
-
-	// Check for Go files
-	goFiles := 0
-	for _, file := range files {
-		if !file.IsDir() && strings.HasSuffix(file.Name(), ".go") {
-			goFiles++
-		}
-	}
-	if goFiles == 0 {
-		return fmt.Errorf("no Go files found in input directory: %s", inputDir)
-	}
-
-	log.Printf("Found %d Go files in input directory", goFiles)
-
-	// Process each Go file
-	for _, file := range files {
-		if !file.IsDir() && strings.HasSuffix(file.Name(), ".go") {
-			inputPath := filepath.Join(inputDir, file.Name())
-			err := agent.ProcessModel(inputPath, outputDir)
-			if err != nil {
-				log.Printf("Error processing %s: %v", file.Name(), err)
-			}
-		}
-	}
-
-	return nil
-}
-
-func loadEnvVars() string {
-	// Load .env file
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Error loading .env file, continuing without it")
-	}
-
-	// Get API key
-	apiKey := os.Getenv(envAPIKeyName)
-	if apiKey == "" {
-		log.Fatalf("Environment variable %s is not set", envAPIKeyName)
-	}
-	return apiKey
 }
 
 func main() {
 	log.Println("Starting data generator")
-	apiKey := loadEnvVars()
 
-	// Initialize AI agent
-	agent, err := NewAIAgent(apiKey)
-	if err != nil {
-		log.Fatalf("Failed to initialize AI agent: %v", err)
+	// Check command-line arguments
+	if len(os.Args) < 2 || os.Args[1] != "customer" {
+		log.Fatal("Usage: go run main.go customer")
 	}
-	defer agent.client.Close()
 
-	// Process input folder
-	err = agent.ProcessInputFolder(inputDir, outputDir)
+	// Ensure input directory exists
+	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
+		log.Fatalf("Input directory does not exist: %s", inputDir)
+	}
+
+	// Ensure output directory exists
+	log.Printf("Creating output directory: %s", outputDir)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Fatalf("Failed to create output directory: %v", err)
+	}
+
+	// Process customer.go
+	inputPath := filepath.Join(inputDir, "customer.go")
+	if _, err := os.Stat(inputPath); os.IsNotExist(err) {
+		log.Fatalf("customer.go not found in input directory: %s", inputDir)
+	}
+
+	err := processCustomer(inputPath, outputDir)
 	if err != nil {
-		log.Fatalf("Error processing input folder: %v", err)
+		log.Fatalf("Error processing customer: %v", err)
 	}
 
 	log.Println("Processing completed successfully")
